@@ -1,0 +1,11 @@
+{
+  "type": "music",
+  "domain": "dlna_music",
+  "stage": "experimental",
+  "name": "DLNA Media Servers",
+  "description": "Browse and stream audio from DLNA/UPnP media servers on the local network.",
+  "codeowners": ["@tantra35"],
+  "requirements": ["async-upnp-client>=0.43.0"],
+  "documentation": "https://github.com/tantra35/music-assistant-dlna-addon",
+  "multi_instance": false
+}
