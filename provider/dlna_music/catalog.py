@@ -9,6 +9,7 @@ only. Container ids are percent-encoded when embedded in the path.
 """
 from __future__ import annotations
 
+import asyncio
 import urllib.parse
 from typing import TYPE_CHECKING
 
@@ -18,7 +19,7 @@ from music_assistant_models.errors import MediaNotFoundError
 from music_assistant_models.media_items import BrowseFolder, MediaItemImage
 
 from .base import ProviderContract
-from .constants import ROOT_REFRESH_MIN_INTERVAL
+from .constants import CACHE_KEY_PREFIX
 from .media import parse_didl_duration
 
 if TYPE_CHECKING:
@@ -88,6 +89,7 @@ class CatalogBrowseMixin(ProviderContract):
 
         folders: list[BrowseFolder] = []
         tracks: list[MediaItemType] = []
+        new_entries: list[tuple[str, dict]] = []
         for obj in objects:
             if isinstance(obj, didl_lite.Container):
                 child_id = str(obj.id)
@@ -114,7 +116,7 @@ class CatalogBrowseMixin(ProviderContract):
                 if not url:
                     continue  # unplayable entry (e.g. radio stub without res)
                 item_id = f"{server.key}|{obj.id}"
-                self._track_cache[item_id] = {
+                info = {
                     "server_key": server.key,
                     "object_id": str(obj.id),
                     "parent_id": str(obj.parent_id),
@@ -124,9 +126,34 @@ class CatalogBrowseMixin(ProviderContract):
                     "url": url,
                     "mime": mime,
                 }
+                self._track_cache[item_id] = info
                 self._track_parent_hints[item_id] = str(obj.parent_id)
+                new_entries.append((item_id, info))
                 tracks.append(self._build_track(item_id))
 
+        if new_entries:
+            await self._persist_tracks(new_entries)
         folders.sort(key=lambda f: f.name.lower())
         tracks.sort(key=lambda t: t.name.lower())
         return [*folders, *tracks]
+
+    async def _persist_tracks(self, entries: list[tuple[str, dict]]) -> None:
+        """Write browsed track metadata to the persistent MA cache.
+
+        Queue items restored from the MA database after a restart resolve
+        through this cache (media._load_persisted) without a network round
+        trip; a failed write only costs a parent re-browse later.
+        """
+
+        async def _store(item_id: str, info: dict) -> None:
+            try:
+                await self.mass.cache.set(
+                    CACHE_KEY_PREFIX + item_id,
+                    info,
+                    provider=self.instance_id,
+                    persistent=True,
+                )
+            except Exception as err:  # noqa: BLE001 - a failed write must not break browse
+                self.logger.debug("DLNA: cache write failed for %s: %s", item_id, err)
+
+        await asyncio.gather(*(_store(item_id, info) for item_id, info in entries))

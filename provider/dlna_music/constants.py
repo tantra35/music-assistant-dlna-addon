@@ -14,4 +14,9 @@ SCAN_INTERVAL = 300
 # a browse of the root triggers a re-scan only if the last scan is older
 ROOT_REFRESH_MIN_INTERVAL = 60
 
+# persistent MA-cache prefix for browsed track metadata. Entries are stored
+# under this prefix (provider=instance_id) so queue items survive a provider
+# restart: _track_cache/_track_parent_hints are in-memory only.
+CACHE_KEY_PREFIX = "track_cache/"
+
 SUPPORTED_FEATURES = {ProviderFeature.BROWSE}

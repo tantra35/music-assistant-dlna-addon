@@ -12,6 +12,10 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import logging
+    from collections.abc import Sequence
+
+    from music_assistant import MusicAssistant
+    from music_assistant_models.media_items import BrowseFolder, MediaItemType, Track
 
     from .discovery import ServerRegistry
 
@@ -26,3 +30,10 @@ class ProviderContract:
         logger: logging.Logger
         domain: str
         instance_id: str
+        mass: MusicAssistant
+
+        def _build_track(self, item_id: str) -> Track: ...
+
+        async def _browse_server(
+            self, parts: list[str]
+        ) -> Sequence[MediaItemType | BrowseFolder]: ...

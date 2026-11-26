@@ -6,11 +6,12 @@ trip, no signed-URL TTL like streaming services.
 
 Track metadata is cached at browse time keyed by `{server_key}|{object_id}`.
 On a cache miss (queue restored from the MA database after a restart) the
-parent container is re-browsed once to repopulate the entry.
+entry is first looked up in the persistent MA cache (written at browse
+time), then - as a fallback - the parent container is re-browsed once.
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import urllib.parse
 
 from music_assistant_models.enums import (
     ContentType,
@@ -22,6 +23,7 @@ from music_assistant_models.media_items import AudioFormat, Track
 from music_assistant_models.streamdetails import StreamDetails
 
 from .base import ProviderContract
+from .constants import CACHE_KEY_PREFIX
 
 
 def parse_didl_duration(raw: str | None) -> int:
@@ -88,14 +90,57 @@ class MediaApiMixin(ProviderContract):
         )
 
     async def _recover_track(self, item_id: str) -> None:
-        """Re-browse the parent container of a cache-missed track id."""
+        """Restore a cache-missed track id (cold cache, e.g. after restart).
+
+        Order: persistent MA cache (no network), then a re-browse of the
+        parent container - parent id either hinted by a live browse or
+        derived from a path-style object id (e.g. miniDLNA).
+        """
         server_key, _, object_id = item_id.partition("|")
         if not server_key or not object_id:
             return
-        # without the parent id (cold cache) we cannot know where to re-browse
-        parent_id = self._track_parent_hints.get(item_id)
+        if await self._load_persisted(item_id):
+            return
+        parent_id = (
+            self._track_parent_hints.get(item_id) or self._derive_parent_id(object_id)
+        )
         if not parent_id:
             return
-        from .catalog import CatalogBrowseMixin  # noqa: PLC0415
+        await self._browse_server([server_key, parent_id])
 
-        await CatalogBrowseMixin._browse_server(self, [server_key, parent_id])
+    async def _load_persisted(self, item_id: str) -> bool:
+        """Load one track entry from the persistent MA cache into the hot cache."""
+        try:
+            data = await self.mass.cache.get(
+                CACHE_KEY_PREFIX + item_id, provider=self.instance_id
+            )
+        except Exception as err:  # noqa: BLE001 - a broken cache must not break playback
+            self.logger.debug("DLNA: cache read failed for %s: %s", item_id, err)
+            return False
+        if not isinstance(data, dict) or not data.get("url"):
+            return False
+        self._track_cache[item_id] = data
+        self._track_parent_hints[item_id] = str(data.get("parent_id") or "")
+        return True
+
+    @staticmethod
+    def _derive_parent_id(object_id: str) -> str | None:
+        """Parent container id of a derivable object id, else None.
+
+        Two common ContentDirectory id conventions allow deriving the
+        parent without a hint: file paths (miniDLNA: dirname; server root
+        container is "0") and ``$``-separated hierarchies (miniDLNA and
+        others: ``64$12`` -> parent ``64``). Opaque ids (bare uuids) yield
+        no parent and cannot be recovered without a hint or the persistent
+        cache.
+        """
+        decoded = urllib.parse.unquote(object_id)
+        for candidate in (decoded, object_id):
+            if "/" in candidate:
+                parent = candidate.rstrip("/").rsplit("/", 1)[0]
+                return parent or "0"
+        for candidate in (decoded, object_id):
+            if "$" in candidate:
+                parent = candidate.rsplit("$", 1)[0]
+                return parent or "0"
+        return None
